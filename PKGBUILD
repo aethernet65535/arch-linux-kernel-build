@@ -1,8 +1,18 @@
 # Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
 
 pkgbase=linux
-pkgver=7.2.10.arch1
 pkgrel=1
+
+# Local kernel tree to build from instead of downloading
+_localrepo=${LOCAL_KERNEL_REPO:-/home/user/65535/workspace/oss/linux/kernel/linux_mainline}
+_localref=${LOCAL_KERNEL_REF:-archlinux}
+
+# Derive pkgver from the Makefile of the local tree
+_mapkv() {
+  git -C "$_localrepo" show "$_localref:Makefile" | sed -n "s/^$1 = //p"
+}
+pkgver="$(_mapkv VERSION).$(_mapkv PATCHLEVEL).$(_mapkv SUBLEVEL)$(_mapkv EXTRAVERSION)"
+pkgver=${pkgver//-/.}
 pkgdesc='Linux'
 url='https://github.com/archlinux/linux'
 arch=(
@@ -14,6 +24,7 @@ makedepends=(
   binutils
   cpio
   gettext
+  git
   glibc
   libelf
   libgcc
@@ -41,55 +52,50 @@ options=(
   !debug
   !strip
 )
-_srcname=linux-${pkgver%.*}
-_srctag=v${pkgver%.*}-${pkgver##*.}
-source=(
-  https://cdn.kernel.org/pub/linux/kernel/v${pkgver%%.*}.x/${_srcname}.tar.{xz,sign}
-  $url/releases/download/$_srctag/linux-$_srctag.patch.zst{,.sig}
-)
-source_x86_64=(config.x86_64)
-validpgpkeys=(
-  ABAF11C65A2970B130ABE3C479BE3E4300411886  # Linus Torvalds
-  647F28654894E3BD457199BE38DBBDC86092693E  # Greg Kroah-Hartman
-  83BC8889351B5DEBBB68416EB8AC08600F108CDF  # Jan Alexander Steffens (heftig)
-)
-b2sums=('f6fa406d0764f0ab9ed199747420e45c422f1cb1a74e5eff1d488b8ad8aa33660440dab2bf15303638e70a9798574ac49550e0fa03bc7550284028548c34cdce'
-        'SKIP'
-        'ba40e6b37149194c8b953ba904666643a1471331d260ec910fa5038d76453bebfa1c0f5acd12607253f590469a5ce27248f93a308ebb94899902ec7b8ed596f1'
-        'SKIP')
-b2sums_x86_64=('085591bef3104e4eb90caa6cae9644e3918bc4f0b135728dd3753b011a84dea1530b8a2f91c08512c361cebf1ba2c2c12bc878fa4f88f7d154762912ca0bec8d')
-
-# https://www.kernel.org/pub/linux/kernel/v7.x/sha256sums.asc
-sha256sums=('2feaa70453e91f541be6a5c9078d8168e081af45a3d9718054850538cff2ebf3'
-            'SKIP'
-            '8ffe49bd444a895726935c0882cdf6cdae78ddc5181e5e807ae130a754055d68'
-            'SKIP')
+_srcname=linux
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase
 export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
 
 prepare() {
+  echo "Getting source from $_localrepo ($_localref)..."
+  local head
+  head=$(git -C "$_localrepo" rev-parse "$_localref")
+  if [[ -e $_srcname/.local-src-rev && $(<$_srcname/.local-src-rev) = "$head" ]]; then
+    echo "Local source unchanged ($head); reusing $_srcname"
+  else
+    local confbak=
+    if [[ -e $_srcname/.config ]]; then
+      confbak=$(mktemp)
+      cp -a "$_srcname/.config" "$confbak"
+    fi
+    echo "Exporting $head to $_srcname..."
+    rm -rf "$_srcname"
+    mkdir "$_srcname"
+    git -C "$_localrepo" archive "$_localref" | tar -x -C "$_srcname"
+    echo "$head" > "$_srcname/.local-src-rev"
+    if [[ -n $confbak ]]; then
+      mv "$confbak" "$_srcname/.config"
+      echo "Kept existing .config"
+    fi
+  fi
+
   cd $_srcname
+
+  if [[ ! -e .config ]]; then
+    echo "ERROR: no .config found in $srcdir/$_srcname" >&2
+    echo "Create one first, then re-run makepkg:" >&2
+    echo "  cd $srcdir/$_srcname && make menuconfig   # or: make defconfig" >&2
+    return 1
+  fi
 
   echo "Setting version..."
   echo "-$pkgrel" > localversion.10-pkgrel
   echo "${pkgbase#linux}" > localversion.20-pkgname
 
-  local src
-  for src in "${source[@]}"; do
-    src="${src%%::*}"
-    src="${src##*/}"
-    src="${src%.zst}"
-    [[ $src = *.patch ]] || continue
-    echo "Applying patch $src..."
-    patch -Np1 < "../$src"
-  done
-
   echo "Setting config..."
-  cp ../config.$CARCH .config
   make olddefconfig
-  diff -u ../config.$CARCH .config || :
 
   make -s kernelrelease > version
   echo "Prepared $pkgbase version $(<version)"
